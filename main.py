@@ -1,8 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 import bcrypt
 import logging
-from fastapi import FastAPI, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
