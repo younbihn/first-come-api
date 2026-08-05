@@ -1,6 +1,9 @@
-from fastapi import FastAPI, HTTPException, Request
+from datetime import datetime, timedelta, timezone
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 import bcrypt
+import jwt
 import logging
 
 logger = logging.getLogger(__name__)
@@ -65,3 +68,48 @@ def signup(req: SignupRequest, request: Request):
         mask_ip(client_ip),
     )
     return {"email": req.email, "message": "가입 완료"}
+
+SECRET_KEY = "dev-secret-change-me"   # 실제 서비스면 환경변수로 (아래 설명 참고)
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+def create_access_token(email: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": email,                                              # 토큰 주인
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),  # 만료 시각
+        "iat": now,                                                # 발급 시각
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+@app.post("/login")
+def login(req: LoginRequest, request: Request):
+    user = users_db.get(req.email)
+    if not user or not verify_password(req.password, user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다")
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info("login success: email=%s ip=%s", mask_email(req.email), mask_ip(client_ip))
+    return {"access_token": create_access_token(req.email), "token_type": "bearer"}
+
+security = HTTPBearer()
+
+def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    try:
+        payload = jwt.decode(cred.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="토큰이 만료되었습니다")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
+
+    user = users_db.get(payload.get("sub"))
+    if not user:
+        raise HTTPException(status_code=401, detail="존재하지 않는 사용자입니다")
+    return user
+
+@app.get("/me")
+def me(user: dict = Depends(get_current_user)):
+    return {"email": user["email"]}
