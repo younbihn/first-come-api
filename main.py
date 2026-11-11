@@ -5,11 +5,39 @@ from pydantic import BaseModel, EmailStr, Field
 import bcrypt
 import jwt
 import logging
+import os
+import pymysql
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
+
+# 설정은 환경변수에서 읽는다 (app01 에서는 systemd 가 넣어준다)
+DB_CONFIG = {
+    "host": os.environ.get("DB_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("DB_PORT", "3306")),
+    "user": os.environ.get("DB_USER", "fcapp"),
+    "password": os.environ.get("DB_PASSWORD", ""),
+    "database": os.environ.get("DB_NAME", "firstcome"),
+    "charset": "utf8mb4",
+    "cursorclass": pymysql.cursors.DictCursor,
+    "connect_timeout": 5,
+}
+
+
+def get_conn():
+    return pymysql.connect(**DB_CONFIG)
+
+
+def find_user(email: str) -> dict | None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT email, hashed_password FROM users WHERE email = %s",
+                (email,),
+            )
+            return cur.fetchone()
 
 @app.get("/")
 def root():
@@ -26,8 +54,6 @@ class Item(BaseModel):
 @app.post("/items")
 def create_item(item: Item):
     return {"created": item.name, "price": item.price}
-
-users_db: dict[str, dict] = {}   # 인메모리 저장소 (8월에 PostgreSQL로 교체)
 
 def hash_password(plain: str) -> str:
     return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
@@ -53,14 +79,19 @@ class SignupRequest(BaseModel):
     email: EmailStr                      # 이메일 형식 자동 검증
     password: str = Field(min_length=8)  # 8자 미만이면 422
 
-@app.post("/signup", status_code=201)
+app.post("/signup", status_code=201)
 def signup(req: SignupRequest, request: Request):
-    if req.email in users_db:
+    hashed = hash_password(req.password)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (email, hashed_password) VALUES (%s, %s)",
+                    (req.email, hashed),
+                )
+            conn.commit()
+    except pymysql.err.IntegrityError:
         raise HTTPException(status_code=409, detail="이미 가입된 이메일입니다")
-    users_db[req.email] = {
-        "email": req.email,
-        "hashed_password": hash_password(req.password),
-    }
     client_ip = request.client.host if request.client else "unknown"
     logger.info(
         "signup completed: email=%s ip=%s",
@@ -69,7 +100,7 @@ def signup(req: SignupRequest, request: Request):
     )
     return {"email": req.email, "message": "가입 완료"}
 
-SECRET_KEY = "dev-secret-change-me"   # 실제 서비스면 환경변수로 (아래 설명 참고)
+SECRET_KEY = os.environ["JWT_SECRET"]
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -88,7 +119,7 @@ def create_access_token(email: str) -> str:
 
 @app.post("/login")
 def login(req: LoginRequest, request: Request):
-    user = users_db.get(req.email)
+    user = find_user(req.email)
     if not user or not verify_password(req.password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다")
     client_ip = request.client.host if request.client else "unknown"
@@ -105,7 +136,7 @@ def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security)) -> 
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
 
-    user = users_db.get(payload.get("sub"))
+    user = find_user(payload.get("sub"))
     if not user:
         raise HTTPException(status_code=401, detail="존재하지 않는 사용자입니다")
     return user
