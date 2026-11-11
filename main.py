@@ -79,7 +79,7 @@ class SignupRequest(BaseModel):
     email: EmailStr                      # 이메일 형식 자동 검증
     password: str = Field(min_length=8)  # 8자 미만이면 422
 
-app.post("/signup", status_code=201)
+@app.post("/signup", status_code=201)
 def signup(req: SignupRequest, request: Request):
     hashed = hash_password(req.password)
     try:
